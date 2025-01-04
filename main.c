@@ -18,12 +18,6 @@
 #define TUN_DEVICE "/dev/net/tun"
 #define BUFFER_SIZE 1500
 
-/**
- * Create a TUN/TAP interface.
- * @param dev_name Name of the interface (e.g., "tun0"). Pass an empty string to let the kernel assign a name.
- * @param flags Interface type: IFF_TUN (TUN device) or IFF_TAP (TAP device).
- * @return File descriptor for the interface, or -1 on failure.
- */
 int create_tun_interface(char *dev_name, int flags) {
     struct ifreq ifr;
     int fd, err;
@@ -143,6 +137,22 @@ uint16_t calculate_tcp_checksum(struct iphdr *ip, struct tcphdr *tcp) {
     
     return checksum;
 }
+bool is_between(uint32_t start, uint32_t x, uint32_t end){
+    if(end < start){
+        if(end < x && x <= start){
+            return false;
+        }
+    }
+    else if(end > start){
+        if(!(start < x && x <= end)){
+            return false;
+        }
+    }
+    else{
+        return false;
+    }
+    return true;
+}
 
 enum state {
     Closed=0,
@@ -230,9 +240,6 @@ int main() {
                     return -1;
                 }
 
-                hashtable_kv_t val = {};
-                val.data = (struct connection *)malloc(sizeof(struct connection));
-
                 struct send_sequence_space sent;
                 sent.iss=htonl(2440000);//2440000 is for testing, should be random
                 sent.una=sent.iss;
@@ -245,8 +252,22 @@ int main() {
                 struct recieve_sequence_space recieved;
                 recieved.irs=tcp_header->th_seq;
                 recieved.nxt=htonl(ntohl(tcp_header->th_seq) + 1);
-                recieved.wnd=tcp_header->th_win;
+                recieved.wnd=htons(tcp_header->th_win);
                 recieved.up=false;//not used
+
+                if(!is_between(sent.una, tcp_header->th_ack, sent.nxt)){
+                    printf("not a valid ack number");
+                    return -1;
+                }
+                if(!is_between(recieved.nxt - 1, tcp_header->th_seq, recieved.nxt + sent.wnd - 1)){
+                    printf("not a valid seq number");
+                    return -1;
+                }
+                //todo
+                if(!is_between(recieved.nxt - 1, tcp_header->th_seq + ip_packet->ip_len - ip_packet->ip_hl*4 - 1, recieved.nxt + sent.wnd - 1)){
+                    printf("not a valid seq number");
+                    return -1;
+                }
 
                 struct iphdr ip_packet;
                 ip_packet.ihl=5;
@@ -285,6 +306,8 @@ int main() {
                     return 1;
                 } 
 
+                hashtable_kv_t val = {};
+                val.data = (struct connection *)malloc(sizeof(struct connection));
                 ((struct connection *)val.data)->sent = sent;
                 ((struct connection *)val.data)->recieved = recieved;
                 ((struct connection *)val.data)->state = SynAckSent;
