@@ -92,6 +92,7 @@ struct pseudo_header {
     uint16_t tcp_length;
 };
 uint16_t calculate_ip_checksum(struct iphdr *ip) {
+    ip->check=0;
     // Save the current checksum value and set it to 0
     uint16_t old_check = ip->check;
     ip->check = 0;
@@ -105,6 +106,7 @@ uint16_t calculate_ip_checksum(struct iphdr *ip) {
     return checksum;
 }
 uint16_t calculate_tcp_checksum(struct iphdr *ip, struct tcphdr *tcp) {
+    tcp->th_sum=0;
     struct pseudo_header psh;
     uint16_t tcp_len = ntohs(ip->tot_len) - (ip->ihl * 4);
     
@@ -187,7 +189,78 @@ struct connection{
     enum state state;
     struct send_sequence_space sent;
     struct recieve_sequence_space recieved;
+    struct iphdr ip_packet;
+    struct tcphdr tcp_packet;
 };
+bool write_packet(struct connection *conn, int *tun_fd, char *data, uint8_t flags) {
+    conn->ip_packet.tot_len=htons(sizeof(struct iphdr) + sizeof(struct tcphdr));//todo missing data
+    conn->tcp_packet.th_seq=htonl(conn->sent.nxt);
+    conn->tcp_packet.th_ack=htonl(conn->recieved.nxt);
+    conn->tcp_packet.th_flags=flags;
+    conn->ip_packet.check = calculate_ip_checksum(&conn->ip_packet);
+    conn->tcp_packet.th_sum = calculate_tcp_checksum(&conn->ip_packet, &conn->tcp_packet);
+
+    conn->sent.una=conn->sent.nxt;
+
+    char packet[4096];
+    memset(packet, 0, 4096);
+    memcpy(packet, &conn->ip_packet, sizeof(struct iphdr));
+    memcpy(packet + sizeof(struct iphdr), &conn->tcp_packet, sizeof(struct tcphdr));
+    if (write(*tun_fd, packet, sizeof(struct iphdr) + sizeof(struct tcphdr)) < 0) {
+        perror("Write to TUN interface failed");
+        return false;
+    } 
+    conn->sent.nxt+=0;//todo missing data
+    conn->sent.nxt+=((conn->tcp_packet.th_flags & TH_FIN) != 0) + ((conn->tcp_packet.th_flags & TH_SYN)!=0);
+    return true;
+}
+int valid_numbers_check(struct connection *conn,struct tcphdr *tcp_header,int nread,int *tun_fd){
+    enum state current_state = conn->state;
+    struct send_sequence_space sent = conn->sent;
+    struct recieve_sequence_space recieved = conn->recieved;
+                    
+    uint32_t ack=ntohl(tcp_header->th_ack);
+    if(!is_between(sent.una, ack, sent.nxt)){
+        printf("not a valid ack number\n");//todo should check what state its in adn should set seq and ack numbers accordingly 
+        if(current_state==SynAckSent){
+            printf("rst sent\n");
+            write_packet(conn,tun_fd,NULL,TH_RST);
+            return 1;
+
+        }
+        return -1;
+    }
+
+    uint32_t seq=ntohl(tcp_header->th_seq);
+    uint32_t segment_len= nread - sizeof(struct ip) - sizeof(struct tcphdr);
+    uint32_t seq_win=recieved.nxt + sent.wnd - 1;
+    segment_len+=((tcp_header->th_flags & TH_FIN) != 0) + ((tcp_header->th_flags & TH_SYN)!=0);
+
+    if(segment_len == 0 && sent.wnd==0){
+        if(seq != recieved.nxt) {
+            printf("not a valid seq number 1");
+            return -1;
+        }
+    }
+    else if(segment_len == 0 && sent.wnd>0){
+        if(!is_between(recieved.nxt - 1, seq, recieved.nxt + sent.wnd - 1)){
+            printf("not a valid seq number 2");
+            return -1;
+        }    
+    }
+    else if(segment_len > 0 && sent.wnd==0){
+        printf("not a valid seq number 3");
+        return -1;
+    }
+    else if(segment_len > 0 && sent.wnd > 0){
+        if(!is_between(recieved.nxt - 1, seq, recieved.nxt + sent.wnd - 1) 
+        && !is_between(recieved.nxt - 1, seq + segment_len -1, seq_win)){
+            printf("not a valid seq number 4" );
+            return -1;
+        }  
+    }  
+    return 0;
+}
 
 int main() {
     char tun_name[IFNAMSIZ] = "tun0";
@@ -220,7 +293,9 @@ int main() {
         if (ip_header->ip_p == IPPROTO_TCP) {
             unsigned int ip_header_length = ip_header->ip_hl * 4;
             struct tcphdr *tcp_header = (struct tcphdr *)(buffer + ip_header_length);
-
+            unsigned int tcp_header_length = tcp_header->th_off * 4;
+            char *data=buffer + ip_header_length + tcp_header_length;
+            size_t data_len=ip_header->ip_len - ip_header_length - tcp_header_length;
             //print_packet(ip_header);
             //print_tcp_header(tcp_header);
             
@@ -241,33 +316,19 @@ int main() {
                 }
 
                 struct send_sequence_space sent;
-                sent.iss=htonl(2440000);//2440000 is for testing, should be random
+                sent.iss=2440000;//2440000 is for testing, should be random
                 sent.una=sent.iss;
-                sent.nxt=htonl(sent.una + 1);
+                sent.nxt=sent.una;
                 sent.up=false;//not used
-                sent.wnd=htons(10);
+                sent.wnd=10;
                 sent.wl1=0;//todo
                 sent.wl2=0;
 
                 struct recieve_sequence_space recieved;
-                recieved.irs=tcp_header->th_seq;
-                recieved.nxt=htonl(ntohl(tcp_header->th_seq) + 1);
-                recieved.wnd=htons(tcp_header->th_win);
+                recieved.irs=ntohl(tcp_header->th_seq);
+                recieved.nxt=ntohl(tcp_header->th_seq) + 1;
+                recieved.wnd=ntohs(tcp_header->th_win);
                 recieved.up=false;//not used
-
-                if(!is_between(sent.una, tcp_header->th_ack, sent.nxt)){
-                    printf("not a valid ack number");
-                    return -1;
-                }
-                if(!is_between(recieved.nxt - 1, tcp_header->th_seq, recieved.nxt + sent.wnd - 1)){
-                    printf("not a valid seq number");
-                    return -1;
-                }
-                //todo
-                if(!is_between(recieved.nxt - 1, tcp_header->th_seq + ip_packet->ip_len - ip_packet->ip_hl*4 - 1, recieved.nxt + sent.wnd - 1)){
-                    printf("not a valid seq number");
-                    return -1;
-                }
 
                 struct iphdr ip_packet;
                 ip_packet.ihl=5;
@@ -285,47 +346,54 @@ int main() {
                 struct tcphdr tcp_packet;
                 tcp_packet.th_dport=quad->source_port;
                 tcp_packet.th_sport = quad->destination_port;
-                tcp_packet.th_seq = sent.iss;    
-                tcp_packet.th_ack = recieved.nxt;//htonl(ntohl(tcp_header->th_seq) + 1);       
+                tcp_packet.th_seq = htonl(sent.iss);    
+                tcp_packet.th_ack = htonl(recieved.nxt);//htonl(ntohl(tcp_header->th_seq) + 1);       
                 tcp_packet.th_off = 5;     
                 tcp_packet.th_flags = TH_SYN | TH_ACK;          
-                tcp_packet.th_win = sent.wnd;//htons(64240);//todo   
+                tcp_packet.th_win = htons(sent.wnd);//htons(64240);//todo   
                 tcp_packet.th_sum = 0;                 
                 tcp_packet.th_urp = 0;
 
                 ip_packet.check = calculate_ip_checksum(&ip_packet);
                 tcp_packet.th_sum = calculate_tcp_checksum(&ip_packet, &tcp_packet);
 
-                char packet[4096];
-                memset(packet, 0, 4096);
-                memcpy(packet, &ip_packet, sizeof(struct iphdr));
-                memcpy(packet + sizeof(struct iphdr), &tcp_packet, sizeof(struct tcphdr));
-                if (write(tun_fd, packet, sizeof(struct iphdr) + sizeof(struct tcphdr)) < 0) {
-                    perror("Write to TUN interface failed");
-                    close(tun_fd);
-                    return 1;
-                } 
-
                 hashtable_kv_t val = {};
                 val.data = (struct connection *)malloc(sizeof(struct connection));
-                ((struct connection *)val.data)->sent = sent;
-                ((struct connection *)val.data)->recieved = recieved;
-                ((struct connection *)val.data)->state = SynAckSent;
+                struct connection* conn=((struct connection *)val.data);
+                conn->sent = sent;
+                conn->recieved = recieved;
+                conn->state = SynAckSent;
+                conn->ip_packet = ip_packet;
+                conn->tcp_packet = tcp_packet;
                 val.bytes = sizeof(struct connection);
+
+                if(!write_packet(conn,&tun_fd,NULL, TH_SYN | TH_ACK)){
+                    close(tun_fd);
+                    return -1;
+                }
+
                 int r = hashtable_put(connections, &key, &val);
             }
             else{
-                enum state current_state = ((struct connection *)connection_state->val.data)->state;
-                switch (current_state)
+                struct connection* conn=((struct connection *)connection_state->val.data);
+                if(valid_numbers_check(conn,tcp_header,nread,&tun_fd)!=0){
+                    return -1;
+                }
+
+                switch (conn->state)
                 {
                 case Closed:
                     printf("\nClosed\n");
                     break;
                 case SynAckSent:  
-                    printf("\nSynAck\n");                
+                    printf("\nSynAck\n"); 
+                    conn->state=Established;             
                     break;
                 case Established:  
-                    printf("\nEstablished\n");                
+                    printf("\nEstablished\n"); 
+                    for (size_t i = 0; i < data_len; ++i) {
+                        printf("%c", data[i]);
+                    }
                     break;    
                 default:
                     break;
