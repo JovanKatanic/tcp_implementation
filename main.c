@@ -48,14 +48,14 @@ int create_tun_interface(char *dev_name, int flags) {
 
     return fd;
 }
-void print_packet(const struct ip* ip_header){
+void print_packet(const struct iphdr* ip_header){
     printf("\nReceived Packet:\n");
-    printf("Version: %d\n", ip_header->ip_v);
-    printf("Header Length: %d\n", ip_header->ip_hl * 4);
-    printf("Total Length: %d\n", ntohs(ip_header->ip_len));
-    printf("Protocol: %d\n", ip_header->ip_p);
-    printf("Source IP: %s\n", inet_ntoa(ip_header->ip_src));
-    printf("Destination IP: %s\n", inet_ntoa(ip_header->ip_dst));
+    printf("Version: %d\n", ip_header->version);
+    printf("Header Length: %d\n", ip_header->ihl * 4);
+    printf("Total Length: %d\n", ntohs(ip_header->tot_len));
+    printf("Protocol: %d\n", ip_header->protocol);
+    printf("Source IP: %u\n", ip_header->saddr);//todo should print in dotted format address
+    printf("Destination IP: %u\n", ip_header->daddr);
 }
 void print_tcp_header(const struct tcphdr *tcp_header) {
     printf("Source port: %u\n", ntohs(tcp_header->source));
@@ -162,12 +162,11 @@ enum state {
     Established=2,
 };
 struct quad {
-    struct in_addr source;
-    struct in_addr destination;
+    uint32_t source;
+    uint32_t destination;
     uint16_t source_port;
     uint16_t destination_port;
 };
-
 struct send_sequence_space{
     uint32_t una;
     uint32_t nxt;
@@ -177,14 +176,12 @@ struct send_sequence_space{
     uint32_t wl2;
     uint32_t iss;
 };
-
 struct recieve_sequence_space{
     uint32_t nxt;
     uint16_t wnd;
     bool up;
     uint32_t irs;
 };
-
 struct connection{
     enum state state;
     struct send_sequence_space sent;
@@ -201,6 +198,7 @@ bool write_packet(struct connection *conn, int *tun_fd, char *data, uint8_t flag
     conn->tcp_packet.th_sum = calculate_tcp_checksum(&conn->ip_packet, &conn->tcp_packet);
 
     conn->sent.una=conn->sent.nxt;
+    conn->sent.nxt=conn->sent.una + 0;//todo missing data
 
     char packet[4096];
     memset(packet, 0, 4096);
@@ -253,6 +251,7 @@ int valid_numbers_check(struct connection *conn,struct tcphdr *tcp_header,int nr
         return -1;
     }
     else if(segment_len > 0 && sent.wnd > 0){
+        printf("%u %u %u \n",recieved.nxt - 1,seq,recieved.nxt + sent.wnd - 1);
         if(!is_between(recieved.nxt - 1, seq, recieved.nxt + sent.wnd - 1) 
         && !is_between(recieved.nxt - 1, seq + segment_len -1, seq_win)){
             printf("not a valid seq number 4" );
@@ -289,19 +288,22 @@ int main() {
             break;
         }
 
-        struct ip *ip_header = (struct ip *)buffer;
-        if (ip_header->ip_p == IPPROTO_TCP) {
-            unsigned int ip_header_length = ip_header->ip_hl * 4;
+        struct iphdr *ip_header = (struct iphdr *)buffer;
+        if (ip_header->protocol == IPPROTO_TCP) {
+            int ip_header_length = ip_header->ihl * 4;
             struct tcphdr *tcp_header = (struct tcphdr *)(buffer + ip_header_length);
-            unsigned int tcp_header_length = tcp_header->th_off * 4;
-            char *data=buffer + ip_header_length + tcp_header_length;
-            size_t data_len=ip_header->ip_len - ip_header_length - tcp_header_length;
+            int tcp_header_length = tcp_header->th_off * 4;
+
+            unsigned char *data=buffer + ip_header_length + tcp_header_length;
+            int data_len = ntohs(ip_header->tot_len) - ip_header_length - tcp_header_length;
+
+            //printf("data len is: %u",data_len);
             //print_packet(ip_header);
             //print_tcp_header(tcp_header);
             
             struct quad* quad=malloc(sizeof(struct quad));//connection should not be formed before its established. 
-            quad->destination=ip_header->ip_dst;
-            quad->source=ip_header->ip_src;
+            quad->destination=ip_header->daddr;
+            quad->source=ip_header->saddr;
             quad->source_port=tcp_header->source;
             quad->destination_port=tcp_header->dest;
             hashtable_kv_t key = {};
@@ -340,8 +342,8 @@ int main() {
                 ip_packet.ttl=64;
                 ip_packet.protocol=6;
                 ip_packet.check=0;
-                ip_packet.saddr=(quad->destination).s_addr;
-                ip_packet.daddr=(quad->source).s_addr;
+                ip_packet.saddr=quad->destination;
+                ip_packet.daddr=quad->source;
 
                 struct tcphdr tcp_packet;
                 tcp_packet.th_dport=quad->source_port;
@@ -376,6 +378,8 @@ int main() {
             }
             else{
                 struct connection* conn=((struct connection *)connection_state->val.data);
+                // print_packet(ip_header);
+                // print_tcp_header(tcp_header);
                 if(valid_numbers_check(conn,tcp_header,nread,&tun_fd)!=0){
                     return -1;
                 }
@@ -391,9 +395,10 @@ int main() {
                     break;
                 case Established:  
                     printf("\nEstablished\n"); 
-                    for (size_t i = 0; i < data_len; ++i) {
-                        printf("%c", data[i]);
-                    }
+                    // conn->recieved.nxt+=data_len;
+                    // for (size_t i = 0; i < data_len; ++i) {
+                    //     printf("%c", data[i]);
+                    // }
                     break;    
                 default:
                     break;
@@ -401,7 +406,7 @@ int main() {
             }
             
         } else {
-            //printf("\nNon-TCP packet (Protocol: %d) received\n", ip_header->ip_p);
+            //printf("\nNon-TCP packet (Protocol: %d) received\n", ip_header->protocol);
         }
     }
 
