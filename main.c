@@ -197,8 +197,7 @@ bool write_packet(struct connection *conn, int *tun_fd, char *data, uint8_t flag
     conn->ip_packet.check = calculate_ip_checksum(&conn->ip_packet);
     conn->tcp_packet.th_sum = calculate_tcp_checksum(&conn->ip_packet, &conn->tcp_packet);
 
-    conn->sent.una=conn->sent.nxt;
-    conn->sent.nxt=conn->sent.una + 0;//todo missing data
+    //conn->sent.una=conn->sent.nxt; //this makes sense
 
     char packet[4096];
     memset(packet, 0, 4096);
@@ -208,15 +207,48 @@ bool write_packet(struct connection *conn, int *tun_fd, char *data, uint8_t flag
         perror("Write to TUN interface failed");
         return false;
     } 
-    conn->sent.nxt+=0;//todo missing data
-    conn->sent.nxt+=((conn->tcp_packet.th_flags & TH_FIN) != 0) + ((conn->tcp_packet.th_flags & TH_SYN)!=0);
+    conn->sent.nxt += 0;//todo missing data
+    conn->sent.nxt += ((conn->tcp_packet.th_flags & TH_FIN) != 0) + ((conn->tcp_packet.th_flags & TH_SYN)!=0);
     return true;
 }
-int valid_numbers_check(struct connection *conn,struct tcphdr *tcp_header,int nread,int *tun_fd){
+int valid_numbers_check(struct connection *conn,struct tcphdr *tcp_header, uint32_t segment_len,int *tun_fd){
     enum state current_state = conn->state;
     struct send_sequence_space sent = conn->sent;
     struct recieve_sequence_space recieved = conn->recieved;
-                    
+
+    uint32_t seq=ntohl(tcp_header->th_seq);
+    uint32_t seq_win=recieved.nxt + sent.wnd - 1;
+    segment_len+=((tcp_header->th_flags & TH_FIN) != 0) + ((tcp_header->th_flags & TH_SYN)!=0);
+
+    if(segment_len == 0 && sent.wnd==0){
+        if(seq != recieved.nxt) {
+            printf("not a valid seq number 1  ");
+            return -1;
+        }
+    }
+    else if(segment_len == 0 && sent.wnd>0){
+        if(!is_between(recieved.nxt - 1, seq, recieved.nxt + sent.wnd - 1)){
+            printf("not a valid seq number 2  ");
+            return -1;
+        }    
+    }
+    else if(segment_len > 0 && sent.wnd==0){
+        printf("not a valid seq number 3  ");
+        return -1;
+    }
+    else if(segment_len > 0 && sent.wnd > 0){
+        if(!is_between(recieved.nxt - 1, seq, recieved.nxt + sent.wnd - 1) 
+        && !is_between(recieved.nxt - 1, seq + segment_len -1, seq_win)){
+            printf("not a valid seq number 4  " );
+            return -1;
+        }  
+    }  
+    conn->recieved.nxt=ntohl(tcp_header->th_seq)+segment_len;//todo if not valid this should get acked
+    if((conn->tcp_packet.th_flags & TH_ACK ) != 0){
+        return 0;
+    }
+
+
     uint32_t ack=ntohl(tcp_header->th_ack);
     if(!is_between(sent.una, ack, sent.nxt)){
         printf("not a valid ack number\n");//todo should check what state its in adn should set seq and ack numbers accordingly 
@@ -228,37 +260,28 @@ int valid_numbers_check(struct connection *conn,struct tcphdr *tcp_header,int nr
         }
         return -1;
     }
+    //conn->sent.una=ack;
 
-    uint32_t seq=ntohl(tcp_header->th_seq);
-    uint32_t segment_len= nread - sizeof(struct ip) - sizeof(struct tcphdr);
-    uint32_t seq_win=recieved.nxt + sent.wnd - 1;
-    segment_len+=((tcp_header->th_flags & TH_FIN) != 0) + ((tcp_header->th_flags & TH_SYN)!=0);
-
-    if(segment_len == 0 && sent.wnd==0){
-        if(seq != recieved.nxt) {
-            printf("not a valid seq number 1");
-            return -1;
-        }
-    }
-    else if(segment_len == 0 && sent.wnd>0){
-        if(!is_between(recieved.nxt - 1, seq, recieved.nxt + sent.wnd - 1)){
-            printf("not a valid seq number 2");
-            return -1;
-        }    
-    }
-    else if(segment_len > 0 && sent.wnd==0){
-        printf("not a valid seq number 3");
-        return -1;
-    }
-    else if(segment_len > 0 && sent.wnd > 0){
-        printf("%u %u %u \n",recieved.nxt - 1,seq,recieved.nxt + sent.wnd - 1);
-        if(!is_between(recieved.nxt - 1, seq, recieved.nxt + sent.wnd - 1) 
-        && !is_between(recieved.nxt - 1, seq + segment_len -1, seq_win)){
-            printf("not a valid seq number 4" );
-            return -1;
-        }  
-    }  
     return 0;
+}
+void print_send_sequence_space(struct send_sequence_space sent) {
+    printf("Send Sequence Space:\n");
+    printf("  ISS: %u\n", sent.iss);
+    printf("  UNA: %u\n", sent.una);
+    printf("  NXT: %u\n", sent.nxt);
+    printf("  UP: %s\n", sent.up ? "true" : "false");
+    printf("  WND: %u\n", sent.wnd);
+    printf("  WL1: %u\n", sent.wl1);
+    printf("  WL2: %u\n", sent.wl2);
+}
+
+// Function to print receive sequence space
+void print_receive_sequence_space(struct recieve_sequence_space recieved) {
+    printf("Receive Sequence Space:\n");
+    printf("  IRS: %u\n", recieved.irs);
+    printf("  NXT: %u\n", recieved.nxt);
+    printf("  WND: %u\n", recieved.wnd);
+    printf("  UP: %s\n", recieved.up ? "true" : "false");
 }
 
 int main() {
@@ -295,7 +318,8 @@ int main() {
             int tcp_header_length = tcp_header->th_off * 4;
 
             unsigned char *data=buffer + ip_header_length + tcp_header_length;
-            int data_len = ntohs(ip_header->tot_len) - ip_header_length - tcp_header_length;
+            //int data_len = ntohs(ip_header->tot_len) - ip_header_length - tcp_header_length;
+            uint32_t segment_len= nread - sizeof(struct iphdr) - sizeof(struct tcphdr);
 
             //printf("data len is: %u",data_len);
             //print_packet(ip_header);
@@ -313,8 +337,8 @@ int main() {
 
             if(connection_state==NULL){ 
                 if((tcp_header->th_flags & 0x02) == 0){
-                    printf("Not a syn packet");
-                    return -1;
+                    printf("Not a syn packet\n");
+                    continue;
                 }
 
                 struct send_sequence_space sent;
@@ -380,9 +404,11 @@ int main() {
                 struct connection* conn=((struct connection *)connection_state->val.data);
                 // print_packet(ip_header);
                 // print_tcp_header(tcp_header);
-                if(valid_numbers_check(conn,tcp_header,nread,&tun_fd)!=0){
-                    return -1;
+                
+                if(valid_numbers_check(conn,tcp_header,segment_len,&tun_fd)==-1){
+                    continue;
                 }
+                
 
                 switch (conn->state)
                 {
@@ -390,19 +416,24 @@ int main() {
                     printf("\nClosed\n");
                     break;
                 case SynAckSent:  
-                    printf("\nSynAck\n"); 
+                    printf("\nSynAck\n");
+                    
+                    //if ack
                     conn->state=Established;             
                     break;
                 case Established:  
-                    printf("\nEstablished\n"); 
-                    // conn->recieved.nxt+=data_len;
-                    // for (size_t i = 0; i < data_len; ++i) {
-                    //     printf("%c", data[i]);
-                    // }
+                    printf("Established\n"); 
+                    
+                    for (size_t i = 0; i < segment_len; ++i) {
+                        printf("%c", data[i]);
+                    }
+                    printf("\n");
+                    write_packet(conn,&tun_fd,NULL,TH_ACK);
                     break;    
                 default:
                     break;
                 }
+                
             }
             
         } else {
