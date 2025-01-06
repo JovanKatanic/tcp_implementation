@@ -10,7 +10,7 @@
 #include <arpa/inet.h>
 #include <netinet/ip.h>
 #include <netinet/tcp.h>
-#include <libnet.h>
+#include <libnet.h>//can i remove it???
 
 #define HASHTABLE_IMPLEMENTATION
 #include "hash_map.h"
@@ -139,21 +139,25 @@ uint16_t calculate_tcp_checksum(struct iphdr *ip, struct tcphdr *tcp) {
     
     return checksum;
 }
+bool wrapping_lt(uint32_t l, uint32_t r){
+    return l-r>(1U << 31);
+}
 bool is_between(uint32_t start, uint32_t x, uint32_t end){
-    if(end < start){
-        if(end < x && x <= start){
-            return false;
-        }
-    }
-    else if(end > start){
-        if(!(start < x && x <= end)){
-            return false;
-        }
-    }
-    else{
-        return false;
-    }
-    return true;
+    // if(end < start){
+    //     if(end < x && x <= start){
+    //         return false;
+    //     }
+    // }
+    // else if(end > start){
+    //     if(!(start < x && x <= end)){
+    //         return false;
+    //     }
+    // }
+    // else{
+    //     return false;
+    // }
+    // return true;
+    return wrapping_lt(start,x) && wrapping_lt(x,end+1);//end +1 so it covers x<=end
 }
 
 enum state {
@@ -164,6 +168,7 @@ enum state {
     FinWait2=4,
     Closing=5,
     TimeWait=6,
+    CloseWait=7,
 };
 struct quad {
     uint32_t source;
@@ -406,13 +411,14 @@ int main() {
 
                 hashtable_kv_t val = {};
                 val.data = (struct connection *)malloc(sizeof(struct connection));
+                val.bytes = sizeof(struct connection);
                 struct connection* conn=((struct connection *)val.data);
                 conn->sent = sent;
                 conn->recieved = recieved;
                 conn->state = SynAckSent;
                 conn->ip_packet = ip_packet;
                 conn->tcp_packet = tcp_packet;
-                val.bytes = sizeof(struct connection);
+                
 
                 if(!write_packet(conn,&tun_fd,NULL, TH_SYN | TH_ACK)){
                     close(tun_fd);
@@ -450,12 +456,12 @@ int main() {
                     break;
                 case Established:  
                     printf("Established\n"); 
-                     
-                    
 
-                    //can go to FinWait1 to test
-                    
-                    if(data[0]=='q'){
+                    if((tcp_header->th_flags & TH_FIN)!=0){
+                        write_packet(conn,&tun_fd,NULL,TH_ACK);
+                        conn->state=CloseWait;
+                    }
+                    else if(data[0]=='q'){
                         write_packet(conn,&tun_fd,NULL,TH_FIN | TH_ACK);//
                         conn->state=FinWait1;
                     }

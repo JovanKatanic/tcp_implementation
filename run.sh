@@ -1,5 +1,6 @@
 #!/bin/bash
-gcc -o tun_setup main.c -lnet
+#gcc -o tun_setup main.c -lnet
+gcc -o inf infrastructure.c state_machine.c -lpthread
 ext=$?
 if [[ $ext -ne 0 ]]; then
     exit $ext
@@ -12,7 +13,7 @@ if ip link show tun0 > /dev/null 2>&1; then
     sudo ip link delete tun0
 fi
 
-./tun_setup &
+./inf & #./tun_setup &
 pid=$!
 sudo ip addr add 192.168.0.1/24 dev tun0
 sudo ip link set up dev tun0
