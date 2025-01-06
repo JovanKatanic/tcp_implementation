@@ -160,6 +160,10 @@ enum state {
     Closed=0,
     SynAckSent=1,
     Established=2,
+    FinWait1=3,
+    FinWait2=4,
+    Closing=5,
+    TimeWait=6,
 };
 struct quad {
     uint32_t source;
@@ -243,24 +247,41 @@ int valid_numbers_check(struct connection *conn,struct tcphdr *tcp_header, uint3
             return -1;
         }  
     }  
-    conn->recieved.nxt=ntohl(tcp_header->th_seq)+segment_len;//todo if not valid this should get acked
+    conn->recieved.nxt=ntohl(tcp_header->th_seq)+segment_len;//todo if not acceptable send ack
     if((conn->tcp_packet.th_flags & TH_ACK ) != 0){
         return 0;
     }
 
+    // if(current_state==SynAckSent){
+        uint32_t ack=ntohl(tcp_header->th_ack);
+    //     if(is_between(sent.una-1, ack, sent.nxt+1)){
+    //         //todo should check what state its in adn should set seq and ack numbers accordingly 
+    //         // if(current_state==SynAckSent){ //todo not a valid reset format 4:27:25
+    //         //     printf("rst sent\n");
+    //         //     write_packet(conn,tun_fd,NULL,TH_RST);
+    //         //     return 1;
 
-    uint32_t ack=ntohl(tcp_header->th_ack);
-    if(!is_between(sent.una, ack, sent.nxt)){
-        printf("not a valid ack number\n");//todo should check what state its in adn should set seq and ack numbers accordingly 
-        if(current_state==SynAckSent){
-            printf("rst sent\n");
-            write_packet(conn,tun_fd,NULL,TH_RST);
-            return 1;
-
+    //         // }
+    //         conn->state=Established;
+    //     }
+    //     else{
+    //         //todo reset
+    //     }
+    //     conn->sent.una=ack;
+    // }
+    // else if(current_state==Established){
+    //     if(!is_between(sent.una, ack, sent.nxt+1)){
+    //         printf("not a valid ack\n");
+    //     }
+    //     conn->sent.una=ack;
+    //     write_packet(conn,&tun_fd,NULL,TH_FIN );//| TH_ACK
+    //     conn->state=FinWait1;
+    // }
+        if(!is_between(sent.una, ack, sent.nxt+1)){
+            printf("not a valid ack\n");
         }
-        return -1;
-    }
-    //conn->sent.una=ack;
+        conn->sent.una=ack;
+        
 
     return 0;
 }
@@ -416,20 +437,69 @@ int main() {
                     printf("\nClosed\n");
                     break;
                 case SynAckSent:  
-                    printf("\nSynAck\n");
+                    // printf("\nSynAck should be unreachable\n");
+                    // return -1;
                     
-                    //if ack
-                    conn->state=Established;             
+                    if((tcp_header->th_flags & TH_ACK)!=0){
+                        conn->state=Established;   
+                    }
+                    else{
+                        //send rst probably
+                    }
+                              
                     break;
                 case Established:  
                     printf("Established\n"); 
+                     
                     
-                    for (size_t i = 0; i < segment_len; ++i) {
-                        printf("%c", data[i]);
+
+                    //can go to FinWait1 to test
+                    
+                    if(data[0]=='q'){
+                        write_packet(conn,&tun_fd,NULL,TH_FIN | TH_ACK);//
+                        conn->state=FinWait1;
                     }
-                    printf("\n");
-                    write_packet(conn,&tun_fd,NULL,TH_ACK);
-                    break;    
+                    else{
+                        for (size_t i = 0; i < segment_len; ++i) {
+                            printf("%c", data[i]);
+                        }
+                        printf("\n");
+                        write_packet(conn,&tun_fd,NULL,TH_ACK);//todo checks if wtite is succ
+                    }
+                    break; 
+                case FinWait1:
+                    printf("FinWait1\n");
+                    if((tcp_header->th_flags & (TH_ACK | TH_FIN))==0){//todo test if i can use tcp_header->th_flags == TH_FLAG instead of this
+                        printf("expected ack or fin");
+                    }
+                    else if((tcp_header->th_flags & TH_ACK)!=0){
+                        conn->state=FinWait2;
+                    }
+                    else if((tcp_header->th_flags & TH_FIN)!=0){
+                        conn->state=Closing;
+                    }
+                    break;  
+                case FinWait2:
+                    printf("FinWait2\n");
+                    if((tcp_header->th_flags & TH_FIN)==0){//todo test if i can use tcp_header->th_flags == TH_FLAG instead of this
+                        printf("expected fin");
+                    }
+                    else{
+                        write_packet(conn,&tun_fd,NULL,TH_ACK);
+                        conn->state=TimeWait;
+                    }
+                    break; 
+                case Closing:
+                    if((tcp_header->th_flags & TH_ACK)==0){//todo test if i can use tcp_header->th_flags == TH_FLAG instead of this
+                        printf("expected ack");
+                    }
+                    else{
+                        conn->state=TimeWait;
+                    }
+                    break;  
+                case TimeWait:
+                    printf("TimeWait\n");
+                    break;               
                 default:
                     break;
                 }
