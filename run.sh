@@ -1,12 +1,12 @@
 #!/bin/bash
 #gcc -o tun_setup main.c -lnet
-gcc -o inf infrastructure.c state_machine.c -lpthread
+gcc -o inf state_machine.c -lpthread
 ext=$?
 if [[ $ext -ne 0 ]]; then
     exit $ext
 fi
 
-sudo setcap cap_net_admin=eip ./tun_setup
+sudo setcap cap_net_admin=eip ./inf #./tun_setup
 
 if ip link show tun0 > /dev/null 2>&1; then
     echo "Cleaning up existing tun0 interface..."
