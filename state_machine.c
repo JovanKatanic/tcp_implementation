@@ -21,6 +21,16 @@
 #define TUN_DEVICE "/dev/net/tun"
 #define BUFFER_SIZE 1500
 
+void print_packet(const struct iphdr* ip_header){
+    printf("\nReceived Packet:\n");
+    printf("Version: %d\n", ip_header->version);
+    printf("Header Length: %d\n", ip_header->ihl * 4);
+    printf("Total Length: %d\n", ntohs(ip_header->tot_len));
+    printf("Protocol: %d\n", ip_header->protocol);
+    printf("Source IP: %u\n", ip_header->saddr);//todo should print in dotted format address
+    printf("Destination IP: %u\n", ip_header->daddr);
+}
+
 enum state {
     Closed=0,
     SynAckSent=1,
@@ -58,6 +68,9 @@ struct connection{
     struct recieve_sequence_space recieved;
     struct iphdr ip_packet;
     struct tcphdr tcp_packet;
+
+    UT_array* incoming;
+    UT_array* unacked;
 };
 
 struct connection_manager{
@@ -83,6 +96,46 @@ struct tcp_stream{
     struct connection_manager* manager;
     struct quad* quad;
 };
+
+struct packet_loop_args{
+    int tun_fd;
+    struct connection_manager* manager;
+};
+
+void* packet_loop(void* arg){
+    struct packet_loop_args* args = (struct packet_loop_args*)arg;
+    char buffer[BUFFER_SIZE];
+    while(1){
+        int nread = read(args->tun_fd, buffer, sizeof(buffer));
+        if (nread < 0) {
+            perror("Reading from TUN interface");
+            break;
+        }
+        
+        struct iphdr *ip_header = (struct iphdr *)buffer;
+        if (ip_header->protocol == IPPROTO_TCP) {
+            int ip_header_length = ip_header->ihl * 4;
+            struct tcphdr *tcp_header = (struct tcphdr *)(buffer + ip_header_length);
+            int tcp_header_length = tcp_header->th_off * 4;
+
+            unsigned char *data=buffer + ip_header_length + tcp_header_length;
+            //int data_len = ntohs(ip_header->tot_len) - ip_header_length - tcp_header_length;
+            uint32_t segment_len= nread - sizeof(struct iphdr) - sizeof(struct tcphdr);
+
+            //printf("data len is: %u",data_len);
+            //print_packet(ip_header);
+            //print_tcp_header(tcp_header);
+            
+            struct quad* quad=malloc(sizeof(struct quad));//connection should not be formed before its established. 
+            quad->destination=ip_header->daddr;
+            quad->source=ip_header->saddr;
+            quad->source_port=tcp_header->source;
+            quad->destination_port=tcp_header->dest;
+
+            print_packet(ip_header);
+        }
+    }
+}
 
 int create_tun_interface(char *dev_name, int flags) {
     struct ifreq ifr;
@@ -132,9 +185,20 @@ struct connection_manager* create_manager(){//todo validity checks
     return manager;
 }
 
-struct interface* create_interface(struct connection_manager* manager){
+struct interface* create_interface(struct connection_manager* manager, int tun_fd){
     struct interface* interface = malloc(sizeof(struct interface));
     interface->manager=manager;
+
+    struct packet_loop_args* args = malloc(sizeof(struct packet_loop_args));
+    args->tun_fd=tun_fd;
+    args->manager=manager;
+
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, packet_loop, args) != 0) {
+        perror("Failed to create thread");
+        return NULL;
+    }
+    
     return interface;
 }
 
@@ -164,13 +228,10 @@ struct tcp_listener* bind_ports(struct interface* interface,uint16_t port){
 }
 
 struct tcp_stream* accept_connections(struct tcp_listener* listener){
-
     hashtable_kv_t key = {};
     uint16_t port = listener->port;
     key.data = &port;
     key.bytes = sizeof(port);
-
-    printf("port is %u\n",port);
 
     pthread_mutex_lock(&(listener->manager->mutex));
 
@@ -197,6 +258,52 @@ struct tcp_stream* accept_connections(struct tcp_listener* listener){
     return stream;
 }
 
+int read_stream(struct tcp_stream* stream,char* buff){
+    hashtable_kv_t key = {};
+    key.data = stream->quad;
+    key.bytes = sizeof(struct quad);
+    pthread_mutex_lock(&(stream->manager->mutex));
+    
+    while(1){
+        hashtable_entry_t* entry=hashtable_get(stream->manager->connections, key.data, key.bytes);
+        if(entry==NULL){
+            printf("connection has been terminated\n");
+            exit(EXIT_FAILURE);//todo remove this.  makes our system vunerable
+        }  
+        struct connection* conn = (struct connection*) entry->val.data;
+        if(conn==NULL){
+            printf("connection was NULL\n");
+            exit(EXIT_FAILURE);
+        }
+        //todo handle when connection is closed
+        //if(conn.is_terminated && utarray_len(conn->incoming)==0)return 0;
+
+        if(utarray_len(conn->incoming)!=0){
+            char* incom = utarray_front(conn->incoming);
+            int n=strlen(incom) + 1;
+            memcpy(buff, incom, n);
+            return n;
+        }
+
+        
+        pthread_cond_wait(&(stream->manager->recv_var), &(stream->manager->mutex));
+    }
+    pthread_mutex_unlock(&(stream->manager->mutex));
+    return -1;
+}
+
+void* write_read_data(void* arg) {
+    struct tcp_stream* stream = (struct tcp_stream*)arg;
+    char buff[BUFFER_SIZE];
+    printf("write\n");
+    printf("shutdown\n");
+    while(read_stream(stream,buff)!=0){
+        struct iphdr *ip_header = (struct iphdr *)buff;
+        print_packet(ip_header);
+    }
+    return NULL;
+}
+
 int main() {
     char tun_name[IFNAMSIZ] = "tun0";
     int tun_fd;
@@ -208,9 +315,9 @@ int main() {
     }
 
     struct connection_manager* manager = create_manager();
-    struct interface* interface = create_interface(manager);
+    struct interface* interface = create_interface(manager,tun_fd);
     struct tcp_listener* listener=bind_ports(interface,80);
-
+    
     while(1){
         struct tcp_stream* stream = accept_connections(listener);
         if(stream==NULL){
@@ -218,8 +325,12 @@ int main() {
             break;
         }
 
+        pthread_t thread; //should join them
+        if (pthread_create(&thread, NULL, write_read_data, (void*)stream) != 0) {
+            perror("Failed to create thread");
+            return 1;
+        }
     }
-
 
     sleep(1);
     
