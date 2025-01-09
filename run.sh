@@ -1,6 +1,6 @@
 #!/bin/bash
 #gcc -o tun_setup main.c -lnet
-gcc -o inf state_machine.c -lpthread
+gcc -o inf state_machine.c infrastructure.c tcp.c -lpthread
 ext=$?
 if [[ $ext -ne 0 ]]; then
     exit $ext

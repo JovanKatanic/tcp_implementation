@@ -1,7 +1,17 @@
 {
     "C_Cpp.errorSquiggles": "disabled",
-    "files.associations": {//todo wtf is this
+    "files.associations": {
         "libnet.h": "c",
-        "string.h": "c"
+        "string.h": "c",
+        "ip.h": "c",
+        "infrastructure.h": "c",
+        "tcp.h": "c",
+        "if_tun.h": "c",
+        "stdbool.h": "c",
+        "pthread.h": "c",
+        "hash_map.h": "c",
+        "fcntl.h": "c",
+        "if.h": "c",
+        "stdint.h": "c"
     }
 }
