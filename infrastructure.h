@@ -3,7 +3,6 @@
 
 struct interface{
     struct connection_manager* manager;
-    //THREAD??
 };
 
 struct tcp_listener{
